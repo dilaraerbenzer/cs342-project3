@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include "rsm.h"
 
 #define SHNAME "/kuromiena"
@@ -31,6 +32,9 @@ struct shared_data {
     //  avoidance
     int MaxM[MAX_PR][MAX_RT];
     int NeedM[MAX_PR][MAX_RT];  
+    
+    sem_t mem_lock_sem;
+    sem_t proc_sem[MAX_PR];
 };
 
 int shared_size = sizeof(struct shared_data);
@@ -78,6 +82,12 @@ int rsm_init(int p_count, int r_count, int exist[],  int avoid)
     if (ptr == MAP_FAILED) { printf("Map failed\n"); return(-1); }
 
     *ptr = data;
+
+    sem_init(&ptr->mem_lock_sem, 1, 1);
+
+    for (int i = 0; i < p_count; i++) {
+        sem_init(&ptr->proc_sem[i], 1, 0);
+    }
     
     return  (ret);
 }
@@ -85,6 +95,15 @@ int rsm_init(int p_count, int r_count, int exist[],  int avoid)
 int rsm_destroy()
 {
     int ret = 0;
+    
+    sem_destroy(&ptr->mem_lock_sem);
+    
+    for (int i = 0; i < ptr->p_count; i++) {
+        sem_destroy(&ptr->proc_sem[i]);
+    }
+    
+    munmap(ptr, shared_size);
+    shm_unlink(SHNAME);
     
     return (ret);
 }
@@ -112,9 +131,34 @@ int rsm_claim (int claim[])
 int rsm_request (int request[])
 {
     int ret = 0;
-    for (int i = 0; i < ptr->r_count; i++) {
-        ptr->AvailV[i] -= request[i];
-        ptr->AllocationM[p_id][i] += request[i];
+    int allocated = 0;
+
+    while (!allocated) {
+        sem_wait(&ptr->mem_lock_sem);
+
+        int can_allocate = 1;
+        for (int i = 0; i < ptr->r_count; i++) {
+            if (request[i] > ptr->AvailV[i]) {
+                can_allocate = 0;
+                break;
+            }
+        }
+
+        if (can_allocate) {
+            for (int i = 0; i < ptr->r_count; i++) {
+                ptr->AvailV[i] -= request[i];
+                ptr->AllocationM[p_id][i] += request[i];
+                ptr->RequestM[p_id][i] = 0;
+            }
+            allocated = 1;
+            sem_post(&ptr->mem_lock_sem);
+        } else {
+            for (int i = 0; i < ptr->r_count; i++) {
+                ptr->RequestM[p_id][i] = request[i];
+            }
+            sem_post(&ptr->mem_lock_sem);
+            sem_wait(&ptr->proc_sem[p_id]);
+        }
     }
     
     return(ret);
@@ -124,10 +168,29 @@ int rsm_request (int request[])
 int rsm_release (int release[])
 {
     int ret = 0;
+    
+    sem_wait(&ptr->mem_lock_sem);
+    
     for (int i = 0; i < ptr->r_count; i++) {
         ptr->AvailV[i] += release[i];
         ptr->AllocationM[p_id][i] -= release[i];
     }
+
+    for (int i = 0; i < ptr->p_count; i++) {
+        int waiting = 0;
+        int available = 1;
+
+        for (int j = 0; j < ptr->r_count; j++) {
+            if (ptr->RequestM[i][j] > 0) waiting = 1;
+            if (ptr->RequestM[i][j] > ptr->AvailV[j]) available = 0;
+        }
+
+        if (waiting && available) {
+            sem_post(&ptr->proc_sem[i]);
+        }
+    }
+
+    sem_post(&ptr->mem_lock_sem);
 
     return (ret);
 }
@@ -174,7 +237,10 @@ void rsm_print_state (char hmsg[])
     printf("##########################\n");
     printf("%s\n",hmsg);
     printf("##########################\n");
+    
+    sem_wait(&ptr->mem_lock_sem);
     struct shared_data data = *ptr;
+    
     printf("Exist:\n");
     print_vector(data.r_count, data.ExistingV);
     printf("Available:\n");
@@ -188,5 +254,7 @@ void rsm_print_state (char hmsg[])
     printf("Need:\n");
     print_matrix(data.p_count, data.r_count, data.NeedM);
 
+    sem_post(&ptr->mem_lock_sem);
+    
     return;
 }

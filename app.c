@@ -14,7 +14,7 @@
 #define NUMP 2        // number of processes
 
 int AVOID = 1;
-int exist[NUMR] =  {80, 90, 50};  // resources existing in the system
+int exist[NUMR] =  {80, 90, 90};  // resources existing in the system
 
 void pr (int apid, char astr[], int m, int r[])
 {
@@ -65,7 +65,7 @@ void func_p1 (int apid)
     pr (apid, "REQ", NUMR, request2);
     rsm_request (request2);
 
-    sleep(1);
+    sleep(3);
 
     rsm_release (request1);
     rsm_release (request2);
@@ -80,8 +80,6 @@ void func_p2 (int apid)
     int request1[MAX_RT];
     int request2[MAX_RT];
     int claim[MAX_RT];
-
-    sleep(1);
 
     rsm_process_started (apid);
     
