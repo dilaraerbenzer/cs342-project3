@@ -10,11 +10,11 @@
 #include <sys/wait.h>
 #include "rsm.h"
 
-#define NUMR 1        // number of resource types
+#define NUMR 3        // number of resource types
 #define NUMP 2        // number of processes
 
 int AVOID = 1;
-int exist[1] =  {8};  // resources existing in the system
+int exist[NUMR] =  {80, 90, 50};  // resources existing in the system
 
 void pr (int apid, char astr[], int m, int r[])
 {
@@ -51,17 +51,17 @@ void func_p1 (int apid)
     int claim[MAX_RT];
     
     rsm_process_started (apid);
-
-    setarray(claim, NUMR, 8);
+    
+    setarray(claim, NUMR, 8, 10, 12);
     rsm_claim (claim);
     
-    setarray(request1, NUMR, 5);
+    setarray(request1, NUMR, 5, 6, 7);
     pr (apid, "REQ", NUMR, request1);
     rsm_request (request1);
-
+    
     sleep(4);
-
-    setarray(request2, NUMR, 3);
+    
+    setarray(request2, NUMR, 3, 4, 5);
     pr (apid, "REQ", NUMR, request2);
     rsm_request (request2);
 
@@ -79,18 +79,20 @@ void func_p2 (int apid)
     int request2[MAX_RT];
     int claim[MAX_RT];
 
-    rsm_process_started (apid);
+    sleep(1);
 
-    setarray(claim, NUMR, 8);
+    rsm_process_started (apid);
+    
+    setarray(claim, NUMR, 80,50,90);
     rsm_claim (claim);
 
-    setarray(request1, NUMR, 2);
+    setarray(request1, NUMR, 50,30,20);
     pr (apid, "REQ", NUMR, request1);
     rsm_request (request1);
 
     sleep(2);
     
-    setarray(request2, NUMR, 4);
+    setarray(request2, NUMR, 30,20,70);
     pr (apid, "REQ", NUMR, request2);
     rsm_request (request2);
 
