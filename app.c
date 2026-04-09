@@ -65,6 +65,8 @@ void func_p1 (int apid)
     pr (apid, "REQ", NUMR, request2);
     rsm_request (request2);
 
+    sleep(1);
+
     rsm_release (request1);
     rsm_release (request2);
 

@@ -10,7 +10,7 @@
 #include <pthread.h>
 #include "rsm.h"
 
-#define SHNAME "kuromiena"
+#define SHNAME "/kuromiena"
 
 int N; // number of processes
 int M; // number of resource types
@@ -36,29 +36,16 @@ struct shared_data {
 int shared_size = sizeof(struct shared_data);
 
 int p_id;
+struct shared_data *ptr;
 
-void save_to_shared(struct shared_data d) {
+int init_shared_data() {
     int shm_fd;
-    void *ptr;
-    shm_fd = shm_open(SHNAME, O_CREAT | O_RDWR, 0666);
-    if (shm_fd == -1) { printf("shared memory failed\n"); exit(-1); }
-    ftruncate(shm_fd, shared_size);
-
-    ptr = mmap(0,shared_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    if (ptr == MAP_FAILED) { printf("Map failed\n"); exit(-1); }
-    ((struct shared_data*)ptr)[0] = d;
-}
-
-struct shared_data read_from_shared() {
-    int shm_fd;
-    void *ptr;
     shm_fd = shm_open(SHNAME, O_RDWR, 0666);
-    if (shm_fd == -1) { printf("shared memory failed\n"); exit(-1); }
-    ftruncate(shm_fd, shared_size);
+    if (shm_fd == -1) { printf("shared memory failed\n"); return(-1); }
 
     ptr = mmap(0,shared_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    if (ptr == MAP_FAILED) { printf("Map failed\n"); exit(-1); }
-    return ((struct shared_data*)ptr)[0];
+    if (ptr == MAP_FAILED) { printf("Map failed\n"); return(-1); }
+    return 0;
 }
 
 //..... definitions/variables .....
@@ -83,7 +70,14 @@ int rsm_init(int p_count, int r_count, int exist[],  int avoid)
         }
     }
 
-    save_to_shared(data);
+    int shm_fd = shm_open(SHNAME, O_RDWR | O_CREAT, 0666);
+    if (shm_fd == -1) { printf("shared memory failed\n"); return(-1); }
+    ftruncate(shm_fd, shared_size);
+
+    ptr = mmap(0,shared_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (ptr == MAP_FAILED) { printf("Map failed\n"); return(-1); }
+
+    *ptr = data;
     
     return  (ret);
 }
@@ -97,10 +91,8 @@ int rsm_destroy()
 
 int rsm_process_started(int apid)
 {
-    int ret = 0;
     p_id = apid;
-
-    return (ret);
+    return init_shared_data();
 }
 
 
@@ -120,12 +112,10 @@ int rsm_claim (int claim[])
 int rsm_request (int request[])
 {
     int ret = 0;
-    struct shared_data data = read_from_shared();
-    for (int i = 0; i < data.r_count; i++) {
-        data.AvailV[i] -= request[i];
-        data.AllocationM[p_id][i] += request[i];
+    for (int i = 0; i < ptr->r_count; i++) {
+        ptr->AvailV[i] -= request[i];
+        ptr->AllocationM[p_id][i] += request[i];
     }
-    save_to_shared(data);
     
     return(ret);
 }
@@ -134,12 +124,10 @@ int rsm_request (int request[])
 int rsm_release (int release[])
 {
     int ret = 0;
-    struct shared_data data = read_from_shared();
-    for (int i = 0; i < data.r_count; i++) {
-        data.AvailV[i] += release[i];
-        data.AllocationM[p_id][i] -= release[i];
+    for (int i = 0; i < ptr->r_count; i++) {
+        ptr->AvailV[i] += release[i];
+        ptr->AllocationM[p_id][i] -= release[i];
     }
-    save_to_shared(data);
 
     return (ret);
 }
@@ -186,7 +174,7 @@ void rsm_print_state (char hmsg[])
     printf("##########################\n");
     printf("%s\n",hmsg);
     printf("##########################\n");
-    struct shared_data data = read_from_shared();
+    struct shared_data data = *ptr;
     printf("Exist:\n");
     print_vector(data.r_count, data.ExistingV);
     printf("Available:\n");
