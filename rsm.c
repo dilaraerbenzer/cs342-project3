@@ -24,6 +24,9 @@ struct shared_data {
     int r_count;
     int avoid;
 
+    int ActiveP[MAX_PR];   // 1 if process has started and not ended
+    int started_count;     // how many processes called rsm_process_started()
+
     int ExistingV[MAX_RT];
     int AvailV[MAX_RT];
     int AllocationM[MAX_PR][MAX_RT];
@@ -37,6 +40,8 @@ struct shared_data {
     sem_t proc_sem[MAX_PR];
     int claim_count;
     sem_t barrier_sem;
+
+    sem_t start_barrier_sem; // for disabled avoidance, wait until all started
 };
 
 int shared_size = sizeof(struct shared_data);
@@ -94,10 +99,6 @@ int is_safe_state(void)
 }
 
 
-
-//..... definitions/variables .....
-//.....
-//.....
 int rsm_init(int p_count, int r_count, int exist[],  int avoid)
 {
     int ret = 0;
@@ -106,6 +107,10 @@ int rsm_init(int p_count, int r_count, int exist[],  int avoid)
     }
 
     struct shared_data data = {p_count, r_count, avoid };
+    for (int i = 0; i < p_count; i++) {
+        data.ActiveP[i] = 0;
+    }
+    data.started_count = 0;
     memcpy(data.ExistingV, exist, r_count * sizeof(int));
     memcpy(data.AvailV, exist, r_count * sizeof(int));
     for (int i = 0; i < p_count; i++) {
@@ -130,6 +135,7 @@ int rsm_init(int p_count, int r_count, int exist[],  int avoid)
 
     sem_init(&ptr->mem_lock_sem, 1, 1);
     sem_init(&ptr->barrier_sem, 1, 0);
+    sem_init(&ptr->start_barrier_sem, 1, 0);
 
     for (int i = 0; i < p_count; i++) {
         sem_init(&ptr->proc_sem[i], 1, 0);
@@ -148,6 +154,7 @@ int rsm_destroy()
     
     sem_destroy(&ptr->mem_lock_sem);
     sem_destroy(&ptr->barrier_sem);
+    sem_destroy(&ptr->start_barrier_sem);
     
     for (int i = 0; i < ptr->p_count; i++) {
         sem_destroy(&ptr->proc_sem[i]);
@@ -162,7 +169,17 @@ int rsm_destroy()
 int rsm_process_started(int apid)
 {
     p_id = apid;
-    return init_shared_data();
+    if (init_shared_data() != 0) return -1;
+
+    sem_wait(&ptr->mem_lock_sem);
+    ptr->ActiveP[apid] = 1;
+    ptr->started_count++;
+    if (!ptr->avoid && ptr->started_count == ptr->p_count) {
+        sem_post(&ptr->start_barrier_sem);
+    }
+    sem_post(&ptr->mem_lock_sem);
+
+    return 0;
 }
 
 
@@ -171,6 +188,7 @@ int rsm_process_ended()
   int ret = 0;
   sem_wait(&ptr->mem_lock_sem);
 
+  ptr->ActiveP[p_id] = 0;
   for (int j = 0; j < ptr->r_count; j++) {
     ptr->AvailV[j] += ptr->AllocationM[p_id][j];
     ptr->AllocationM[p_id][j] = 0;
@@ -220,6 +238,74 @@ int rsm_claim (int claim[])
 
 
 
+int rsm_request (int request[])
+{
+    if (ptr == NULL) return -1;
+
+    // avoid==1: wait until all claims are registered
+    if (ptr->avoid) {
+        sem_wait(&ptr->barrier_sem);
+        sem_post(&ptr->barrier_sem);
+    } else {
+        // avoid==0: wait until all processes have started
+        sem_wait(&ptr->start_barrier_sem);
+        sem_post(&ptr->start_barrier_sem);
+    }
+
+    while (1) {
+        sem_wait(&ptr->mem_lock_sem);
+
+        for (int j = 0; j < ptr->r_count; j++) {
+            if (request[j] < 0) {
+                sem_post(&ptr->mem_lock_sem);
+                return -1;
+            }
+            if (request[j] > ptr->ExistingV[j]) {
+                sem_post(&ptr->mem_lock_sem);
+                return -1;
+            }
+            if (ptr->avoid && request[j] > ptr->NeedM[p_id][j]) {
+                sem_post(&ptr->mem_lock_sem);
+                return -1;
+            }
+            ptr->RequestM[p_id][j] = request[j];
+        }
+
+        int can_grant = 1;
+        for (int j = 0; j < ptr->r_count; j++) {
+            if (request[j] > ptr->AvailV[j]) { can_grant = 0; break; }
+        }
+
+        if (can_grant) {
+           // resource allocation
+            for (int j = 0; j < ptr->r_count; j++) {
+                ptr->AvailV[j] -= request[j];
+                ptr->AllocationM[p_id][j] += request[j];
+                if (ptr->avoid) ptr->NeedM[p_id][j] -= request[j];
+            }
+
+            if (!ptr->avoid || is_safe_state()) {
+                for (int j = 0; j < ptr->r_count; j++) {
+                    ptr->RequestM[p_id][j] = 0;
+                }
+                sem_post(&ptr->mem_lock_sem);
+                return 0;
+            }
+
+            // unsafe state -> rollback
+            for (int j = 0; j < ptr->r_count; j++) {
+                ptr->AvailV[j] += request[j];
+                ptr->AllocationM[p_id][j] -= request[j];
+                if (ptr->avoid) ptr->NeedM[p_id][j] += request[j];
+            }
+        }
+
+        sem_post(&ptr->mem_lock_sem);
+        sem_wait(&ptr->proc_sem[p_id]);
+    }
+}
+
+
 int rsm_release (int release[])
 {
     int ret = 0;
@@ -261,9 +347,54 @@ int rsm_release (int release[])
 
 int rsm_detection()
 {
-    int ret = 0;
-    
-    return (ret);
+    if (ptr == NULL) return -1;
+
+    sem_wait(&ptr->mem_lock_sem);
+
+    int work[MAX_RT];
+    int finish[MAX_PR];
+
+    for (int j = 0; j < ptr->r_count; j++) {
+        work[j] = ptr->AvailV[j];
+    }
+
+    for (int i = 0; i < ptr->p_count; i++) {
+        finish[i] = (ptr->ActiveP[i] == 0) ? 1 : 0;
+    }
+
+    int progress = 1;
+    while (progress) {
+        progress = 0;
+        for (int i = 0; i < ptr->p_count; i++) {
+            if (finish[i]) continue;
+
+            int can_finish = 1;
+            for (int j = 0; j < ptr->r_count; j++) {
+                if (ptr->RequestM[i][j] > work[j]) { can_finish = 0; break; }
+            }
+
+            if (can_finish) {
+                for (int j = 0; j < ptr->r_count; j++) {
+                    work[j] += ptr->AllocationM[i][j];
+                }
+                finish[i] = 1;
+                progress = 1;
+            }
+        }
+    }
+
+    int deadlocked = 0;
+    for (int i = 0; i < ptr->p_count; i++) {
+        if (finish[i]) continue;
+        int waiting = 0;
+        for (int j = 0; j < ptr->r_count; j++) {
+            if (ptr->RequestM[i][j] > 0) { waiting = 1; break; }
+        }
+        if (waiting) deadlocked++;
+    }
+
+    sem_post(&ptr->mem_lock_sem);
+    return deadlocked;
 }
 
 void print_matrix (int rows, int cols, int data[][MAX_RT]) {
